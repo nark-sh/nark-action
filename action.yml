@@ -1,0 +1,50 @@
+name: 'nark - Dependency Error Checker'
+description: 'Check TypeScript projects for missing dependency error handling against 169+ npm package profiles'
+author: 'nark-sh'
+
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  tsconfig:
+    description: 'Path to tsconfig.json (auto-detected if omitted)'
+    required: false
+    default: ''
+  fail-threshold:
+    description: 'Exit 1 if violations at or above this severity (error|warning|info)'
+    required: false
+    default: 'error'
+  report-only:
+    description: 'Always exit 0 regardless of violations (report-only mode)'
+    required: false
+    default: 'false'
+  version:
+    description: 'nark version to use (default: latest)'
+    required: false
+    default: 'latest'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run nark
+      shell: bash
+      env:
+        INPUT_TSCONFIG: ${{ inputs.tsconfig }}
+        INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
+        INPUT_REPORT_ONLY: ${{ inputs.report-only }}
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        ARGS=""
+
+        if [ -n "$INPUT_TSCONFIG" ]; then
+          ARGS="$ARGS --tsconfig $INPUT_TSCONFIG"
+        fi
+
+        ARGS="$ARGS --fail-threshold $INPUT_FAIL_THRESHOLD"
+
+        if [ "$INPUT_REPORT_ONLY" = "true" ]; then
+          ARGS="$ARGS --report-only"
+        fi
+
+        npx nark@"$INPUT_VERSION" $ARGS
