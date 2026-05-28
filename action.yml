@@ -19,6 +19,10 @@ inputs:
     description: 'Always exit 0 regardless of violations (report-only mode)'
     required: false
     default: 'false'
+  diff-base:
+    description: 'If set, run nark in line-level diff mode against `$diff-base..HEAD` (e.g. github.event.pull_request.base.sha). Only reports violations on lines the diff touched.'
+    required: false
+    default: ''
   version:
     description: 'nark version to use (default: latest)'
     required: false
@@ -33,6 +37,7 @@ runs:
         INPUT_TSCONFIG: ${{ inputs.tsconfig }}
         INPUT_FAIL_THRESHOLD: ${{ inputs.fail-threshold }}
         INPUT_REPORT_ONLY: ${{ inputs.report-only }}
+        INPUT_DIFF_BASE: ${{ inputs.diff-base }}
         INPUT_VERSION: ${{ inputs.version }}
       run: |
         ARGS=""
@@ -45,6 +50,10 @@ runs:
 
         if [ "$INPUT_REPORT_ONLY" = "true" ]; then
           ARGS="$ARGS --report-only"
+        fi
+
+        if [ -n "$INPUT_DIFF_BASE" ]; then
+          ARGS="$ARGS --diff $INPUT_DIFF_BASE..HEAD"
         fi
 
         npx nark@"$INPUT_VERSION" $ARGS

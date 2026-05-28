@@ -48,6 +48,7 @@ jobs:
 | `tsconfig` | Path to tsconfig.json (auto-detected if omitted) | `''` |
 | `fail-threshold` | Exit 1 if violations at or above this severity (`error` \| `warning` \| `info`) | `error` |
 | `report-only` | Always exit 0 regardless of violations | `false` |
+| `diff-base` | If set, only report violations on lines added/modified by `git diff $diff-base..HEAD`. Pair with `github.event.pull_request.base.sha` for PR scans. | `''` |
 | `version` | nark version to use | `latest` |
 
 ## Examples
@@ -75,6 +76,16 @@ jobs:
   with:
     fail-threshold: warning
 ```
+
+### PR diff mode (only flag what the PR changed)
+
+```yaml
+- uses: nark-sh/nark-action@v1
+  with:
+    diff-base: ${{ github.event.pull_request.base.sha }}
+```
+
+In `--diff` mode nark only reports violations on lines the PR actually added or modified. Pre-existing violations on untouched lines in touched files are excluded. Same posture CodeRabbit and Greptile take.
 
 ### Pin to a specific version
 
