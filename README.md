@@ -79,13 +79,37 @@ jobs:
 
 ### PR diff mode (only flag what the PR changed)
 
+Only report violations on lines the PR actually added or modified. Pre-existing
+violations on untouched lines of modified files are excluded — same posture
+CodeRabbit and Greptile take.
+
 ```yaml
-- uses: nark-sh/nark-action@v1
-  with:
-    diff-base: ${{ github.event.pull_request.base.sha }}
+name: Nark
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Required so the action can compute the diff against the PR base
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - uses: nark-sh/nark-action@v1
+        with:
+          diff-base: ${{ github.event.pull_request.base.sha }}
 ```
 
-In `--diff` mode nark only reports violations on lines the PR actually added or modified. Pre-existing violations on untouched lines in touched files are excluded. Same posture CodeRabbit and Greptile take.
+**Note:** `github.event.pull_request.base.sha` only exists on `pull_request`
+events. Don't set `diff-base` on `push`-triggered runs unless you supply a
+different base (e.g. `${{ github.event.before }}`). When `diff-base` is empty,
+the action falls back to scanning the entire project.
 
 ### Pin to a specific version
 
