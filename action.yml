@@ -27,11 +27,57 @@ inputs:
     description: 'nark version to use (default: latest)'
     required: false
     default: 'latest'
+  output:
+    description: 'Path to write the audit JSON. Used by the verify-artifact + upload-artifact + summary steps below.'
+    required: false
+    default: 'nark-audit.json'
+  node-options:
+    description: 'NODE_OPTIONS for the nark step. Default raises Node old-gen heap to 8 GB to prevent OOM (exit 134) on mid-sized TS programs. Set to empty to use Node defaults.'
+    required: false
+    default: '--max-old-space-size=8192'
+  verify-artifact:
+    description: 'If true (default), fail the step when nark exits without producing the audit JSON. Catches the silent-success failure mode where `continue-on-error: true` + a crashed scanner + missing-file `actions/upload-artifact` warnings all combine to report green while the job did nothing.'
+    required: false
+    default: 'true'
+  upload-artifact:
+    description: 'If true (default), upload the audit JSON as a workflow artifact. Skipped automatically if the file was not produced.'
+    required: false
+    default: 'true'
+  artifact-name:
+    description: 'Name for the uploaded artifact.'
+    required: false
+    default: 'nark-audit'
+  artifact-retention-days:
+    description: 'Workflow artifact retention in days. GitHub Actions default is 90.'
+    required: false
+    default: '30'
+  telemetry:
+    description: 'If true, leave NARK_TELEMETRY untouched (the CLI default sends anonymous usage data). Default false disables telemetry during CI runs — the SaaS receipts that motivate telemetry come from interactive scans, not CI.'
+    required: false
+    default: 'false'
+
+outputs:
+  audit-path:
+    description: 'Path of the produced audit JSON. Empty if no audit was written.'
+    value: ${{ steps.summary.outputs.audit-path }}
+  total-violations:
+    description: 'Total violation count from the audit JSON. 0 if no audit was produced.'
+    value: ${{ steps.summary.outputs.total-violations }}
+  error-count:
+    description: 'Error-severity violation count.'
+    value: ${{ steps.summary.outputs.error-count }}
+  warning-count:
+    description: 'Warning-severity violation count.'
+    value: ${{ steps.summary.outputs.warning-count }}
+  info-count:
+    description: 'Info-severity violation count.'
+    value: ${{ steps.summary.outputs.info-count }}
 
 runs:
   using: 'composite'
   steps:
     - name: Run nark
+      id: nark-run
       shell: bash
       env:
         INPUT_TSCONFIG: ${{ inputs.tsconfig }}
@@ -39,7 +85,18 @@ runs:
         INPUT_REPORT_ONLY: ${{ inputs.report-only }}
         INPUT_DIFF_BASE: ${{ inputs.diff-base }}
         INPUT_VERSION: ${{ inputs.version }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        NODE_OPTIONS: ${{ inputs.node-options }}
       run: |
+        # qt-265: NARK_TELEMETRY=false by default in CI. The composite step
+        # only sets it when the input is false (default); leaving the input
+        # as 'true' means we don't export the env var at all, so the CLI
+        # uses its normal default (telemetry enabled with first-run
+        # notice).
+        if [ "${{ inputs.telemetry }}" = "false" ]; then
+          export NARK_TELEMETRY='false'
+        fi
+
         ARGS=""
 
         if [ -n "$INPUT_TSCONFIG" ]; then
@@ -56,4 +113,104 @@ runs:
           ARGS="$ARGS --diff $INPUT_DIFF_BASE..HEAD"
         fi
 
+        ARGS="$ARGS --output $INPUT_OUTPUT"
+
+        # `set +e` so a non-zero exit from npx nark (violations above
+        # threshold, scanner crash, etc.) doesn't abort the composite
+        # before the verify + summary + upload steps run. We capture the
+        # exit code and re-raise it at the bottom of the composite if
+        # appropriate.
+        set +e
         npx nark@"$INPUT_VERSION" $ARGS
+        echo "nark-exit-code=$?" >> "$GITHUB_OUTPUT"
+        set -e
+
+    - name: Verify nark produced an audit
+      id: verify
+      if: inputs.verify-artifact == 'true'
+      shell: bash
+      env:
+        INPUT_OUTPUT: ${{ inputs.output }}
+      run: |
+        # The silent-success failure mode: `continue-on-error: true` (on
+        # the caller's step) + a crashed scanner + `actions/upload-artifact@v4`
+        # emitting "No files were found" as a warning (not an error) =
+        # the job reports green while the scan produced nothing. We hit
+        # this 18 times in a row on saas before noticing.
+        # See: https://nark.sh/articles/github-actions-security-scanner-silent-success
+        if [ ! -f "$INPUT_OUTPUT" ]; then
+          echo "::error::Nark did not produce $INPUT_OUTPUT — the scanner crashed before writing output."
+          echo "::error::Check the 'Run nark' step log above. Common causes: OOM (exit 134), missing node_modules, no matching tsconfig."
+          exit 1
+        fi
+
+    - name: Summarize results
+      id: summary
+      if: hashFiles(inputs.output) != ''
+      shell: bash
+      env:
+        INPUT_OUTPUT: ${{ inputs.output }}
+      run: |
+        # Parse the audit JSON into step outputs + the GitHub step
+        # summary panel. jq is preinstalled on GitHub-hosted runners.
+        AUDIT_PATH="$INPUT_OUTPUT"
+        TOTAL=$(jq '.summary.total_violations // 0' "$AUDIT_PATH")
+        ERRORS=$(jq '.summary.error_count // 0' "$AUDIT_PATH")
+        WARNINGS=$(jq '.summary.warning_count // 0' "$AUDIT_PATH")
+        INFO=$(jq '.summary.info_count // 0' "$AUDIT_PATH")
+        FILES=$(jq '.summary.files_analyzed // 0' "$AUDIT_PATH")
+
+        echo "audit-path=$AUDIT_PATH" >> "$GITHUB_OUTPUT"
+        echo "total-violations=$TOTAL" >> "$GITHUB_OUTPUT"
+        echo "error-count=$ERRORS" >> "$GITHUB_OUTPUT"
+        echo "warning-count=$WARNINGS" >> "$GITHUB_OUTPUT"
+        echo "info-count=$INFO" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "## Nark profile scan"
+          echo ""
+          if [ "$TOTAL" = "0" ]; then
+            echo "✅ **0 violations** across $FILES files."
+          else
+            echo "**$TOTAL violations** across $FILES files: $ERRORS error · $WARNINGS warning · $INFO info."
+            echo ""
+            echo "### Top packages"
+            echo ""
+            echo "| Package | Violations |"
+            echo "|---------|-----------:|"
+            jq -r '
+              [.violations[] | .package]
+              | group_by(.)
+              | map({pkg: .[0], n: length})
+              | sort_by(-.n)
+              | .[0:10][]
+              | "| `\(.pkg)` | \(.n) |"
+            ' "$AUDIT_PATH"
+          fi
+          echo ""
+          echo "Audit JSON: \`$AUDIT_PATH\` (uploaded as workflow artifact)"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload nark audit
+      if: inputs.upload-artifact == 'true' && hashFiles(inputs.output) != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.output }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    - name: Propagate nark exit code
+      shell: bash
+      env:
+        NARK_EXIT_CODE: ${{ steps.nark-run.outputs.nark-exit-code }}
+      run: |
+        # The Run nark step was wrapped in `set +e` so the composite
+        # could continue through verify + summary + upload. Re-raise the
+        # original exit code here so the caller's `continue-on-error:
+        # true` (or absence thereof) still decides whether the workflow
+        # fails. Without this, a non-zero nark exit would be silently
+        # swallowed by the composite.
+        if [ -n "$NARK_EXIT_CODE" ] && [ "$NARK_EXIT_CODE" != "0" ]; then
+          echo "Nark exited with code $NARK_EXIT_CODE"
+          exit "$NARK_EXIT_CODE"
+        fi

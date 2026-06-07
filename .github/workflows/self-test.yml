@@ -1,0 +1,114 @@
+name: Self-test
+
+# qt-265 (v2): the nark-action self-test. Every PR + main push runs
+# the action against the bundled demo project shipped by the nark npm
+# package itself (`npx nark --demo` extracts a sample TS project with
+# intentional axios/stripe/@prisma/client violations). That gives us
+# a deterministic ~7-violation baseline to assert against — without
+# having to wire up a separate fixture repo just for the action.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # The "happy path" — verify the action wires up nark, writes the
+  # audit JSON, summarizes, uploads the artifact, and surfaces the
+  # output values to the caller. Uses --demo (qt-256) so we have a
+  # guaranteed non-empty audit.
+  self-test:
+    name: self-test against bundled demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Pull the demo fixture out of the npm package so this self-test
+      # is independent of nark's source tree. `npm pack --pack-destination`
+      # gives us a tarball we extract into ./demo-project. After that,
+      # the bundled demo's tsconfig becomes our scan target.
+      - name: Stage nark demo fixture
+        run: |
+          mkdir demo-staging && cd demo-staging
+          npm pack nark@latest
+          tar -xzf nark-*.tgz
+          mv package ../demo-project
+          cd .. && rm -rf demo-staging
+
+      # Run the action under test against the staged demo.
+      # report-only: 'true' so the deliberate 7-violation baseline
+      # doesn't fail the workflow — we're testing the action's
+      # output handling, not gating on its findings.
+      - name: Run nark-action under test
+        id: nark
+        uses: ./
+        with:
+          tsconfig: ./demo-project/demo/tsconfig.json
+          report-only: 'true'
+          artifact-name: self-test-audit
+
+      # Assert the action populated its outputs with non-empty values
+      # parsed from the audit JSON. The demo guarantees 7 violations
+      # across axios + stripe + @prisma/client, so we know what to
+      # check.
+      - name: Assert outputs
+        run: |
+          echo "audit-path: ${{ steps.nark.outputs.audit-path }}"
+          echo "total-violations: ${{ steps.nark.outputs.total-violations }}"
+          echo "error-count: ${{ steps.nark.outputs.error-count }}"
+          echo "warning-count: ${{ steps.nark.outputs.warning-count }}"
+
+          test -n "${{ steps.nark.outputs.audit-path }}" || {
+            echo "::error::audit-path output is empty"
+            exit 1
+          }
+          test "${{ steps.nark.outputs.total-violations }}" -gt 0 || {
+            echo "::error::expected non-zero violations from the demo fixture"
+            exit 1
+          }
+          test -f "${{ steps.nark.outputs.audit-path }}" || {
+            echo "::error::action reported audit-path but file is missing"
+            exit 1
+          }
+
+  # The "verify-artifact catches silent failure" path. Force the
+  # scanner to crash before producing output (impossible tsconfig
+  # path) and assert the action fails loud instead of reporting
+  # green. continue-on-error: true on the action step + an explicit
+  # outcome check after = the test passes only if the action's
+  # internal verify step surfaced the failure.
+  verify-artifact-test:
+    name: verify-artifact catches silent failure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run nark-action with bogus tsconfig
+        id: nark
+        uses: ./
+        continue-on-error: true
+        with:
+          tsconfig: ./this-file-does-not-exist.json
+          upload-artifact: 'false'
+
+      - name: Assert verify-artifact reported failure
+        run: |
+          # outcome: real exit code from the action step
+          # conclusion: post-continue-on-error verdict (always 'success' here)
+          echo "outcome: ${{ steps.nark.outcome }}"
+          echo "conclusion: ${{ steps.nark.conclusion }}"
+
+          if [ "${{ steps.nark.outcome }}" != "failure" ]; then
+            echo "::error::expected outcome=failure when nark crashes; got '${{ steps.nark.outcome }}'"
+            echo "::error::this is the silent-success failure mode the v2 verify-artifact step is supposed to catch"
+            exit 1
+          fi
