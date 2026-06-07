@@ -16,10 +16,12 @@ on:
 jobs:
   # The "happy path" — verify the action wires up nark, writes the
   # audit JSON, summarizes, uploads the artifact, and surfaces the
-  # output values to the caller. Uses --demo (qt-256) so we have a
-  # guaranteed non-empty audit.
+  # output values to the caller. Inlines a minimal axios fixture so
+  # the test is deterministic and independent of whatever nark version
+  # is currently on npm (the qt-256 bundled-demo path requires nark
+  # >=2.5.0 which isn't published yet as of this PR).
   self-test:
-    name: self-test against bundled demo
+    name: self-test against inline axios fixture
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,34 +30,71 @@ jobs:
         with:
           node-version: 20
 
-      # Pull the demo fixture out of the npm package so this self-test
-      # is independent of nark's source tree. `npm pack --pack-destination`
-      # gives us a tarball we extract into ./demo-project. After that,
-      # the bundled demo's tsconfig becomes our scan target.
-      - name: Stage nark demo fixture
+      # Build a minimal TS project that exercises the axios profile.
+      # Three intentional violations (no try/catch around axios.get /
+      # axios.post / axios with a generic catch that doesn't handle
+      # 429). The fixture needs node_modules with axios installed so
+      # nark's TS analyzer can resolve the import — without it, every
+      # call resolves to `any` and nark's qt-179 pre-scan check bails.
+      - name: Stage inline fixture
         run: |
-          mkdir demo-staging && cd demo-staging
-          npm pack nark@latest
-          tar -xzf nark-*.tgz
-          mv package ../demo-project
-          cd .. && rm -rf demo-staging
+          mkdir -p fixture/src
+          cat > fixture/package.json <<'EOF'
+          {
+            "name": "nark-action-self-test-fixture",
+            "version": "0.0.0",
+            "private": true,
+            "dependencies": { "axios": "^1.7.0" }
+          }
+          EOF
+          cat > fixture/tsconfig.json <<'EOF'
+          {
+            "compilerOptions": {
+              "target": "ES2020",
+              "module": "commonjs",
+              "lib": ["ES2020"],
+              "strict": true,
+              "esModuleInterop": true,
+              "skipLibCheck": true,
+              "moduleResolution": "node"
+            },
+            "include": ["src/**/*.ts"]
+          }
+          EOF
+          cat > fixture/src/api.ts <<'EOF'
+          import axios from "axios";
 
-      # Run the action under test against the staged demo.
-      # report-only: 'true' so the deliberate 7-violation baseline
-      # doesn't fail the workflow — we're testing the action's
-      # output handling, not gating on its findings.
+          // VIOLATION: no try/catch — axios rejects on network errors / 4xx / 5xx.
+          export async function fetchUser(id: string) {
+            const res = await axios.get(`https://api.example.com/users/${id}`);
+            return res.data;
+          }
+
+          // VIOLATION: no try/catch on POST — even more dangerous because retrying
+          // naively could double-post without an idempotency key.
+          export async function createUser(name: string) {
+            const res = await axios.post("https://api.example.com/users", { name });
+            return res.data;
+          }
+          EOF
+          cd fixture && npm install --no-audit --no-fund
+
+      # Run the action under test against the inline fixture.
+      # report-only: 'true' so the deliberate violations don't fail
+      # the workflow — we're testing the action's output handling,
+      # not gating on its findings.
       - name: Run nark-action under test
         id: nark
         uses: ./
         with:
-          tsconfig: ./demo-project/demo/tsconfig.json
+          tsconfig: ./fixture/tsconfig.json
           report-only: 'true'
           artifact-name: self-test-audit
 
       # Assert the action populated its outputs with non-empty values
-      # parsed from the audit JSON. The demo guarantees 7 violations
-      # across axios + stripe + @prisma/client, so we know what to
-      # check.
+      # parsed from the audit JSON. The fixture has 2 deliberate
+      # axios calls without try/catch, so we expect at least 2
+      # violations.
       - name: Assert outputs
         run: |
           echo "audit-path: ${{ steps.nark.outputs.audit-path }}"
@@ -68,7 +107,7 @@ jobs:
             exit 1
           }
           test "${{ steps.nark.outputs.total-violations }}" -gt 0 || {
-            echo "::error::expected non-zero violations from the demo fixture"
+            echo "::error::expected non-zero violations from the inline axios fixture"
             exit 1
           }
           test -f "${{ steps.nark.outputs.audit-path }}" || {
