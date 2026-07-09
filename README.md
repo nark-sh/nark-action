@@ -7,10 +7,26 @@ Wraps [`nark`](https://github.com/nark-sh/nark) so you can add a single line to 
 ## Quick start
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
 ```
 
 That's it. nark auto-detects your `tsconfig.json`, scans your project, writes `nark-audit.json`, posts a step summary with violation counts, and uploads the audit as a workflow artifact.
+
+## With the pro corpus (enterprise / design-partner)
+
+If you have a `read:packages` GitHub PAT for `@nark-sh/corpus-pro`, pass it as `corpus-token` and the action wires the private registry + installs the package before scanning:
+
+```yaml
+- uses: nark-sh/nark-action@v3
+  with:
+    corpus-token: ${{ secrets.NARK_CORPUS_PRO_TOKEN }}
+```
+
+That's the entire integration for a self-hosted enterprise scan. No `.npmrc` to hand-write. No extra install step. Your source stays in your CI.
+
+## Why v3?
+
+v3 adds the `corpus-token` input for pinning `@nark-sh/corpus-pro` in ephemeral CI runs. Nothing else changed — the v2 dogfood-proven defaults (silent-success guard, OOM-safe heap, telemetry off, artifact upload, step summary) all carry forward.
 
 ## Why v2?
 
@@ -34,6 +50,17 @@ v1 was a thin wrapper: it called `npx nark` with your inputs and exited. That's 
 
 You'll see a new `nark-audit` workflow artifact on every run + a step summary panel. If you were already running your own `actions/upload-artifact@v4` step after the v1 action, either remove yours or set `upload-artifact: 'false'` on v2 to avoid duplicates.
 
+## Migrating from v2
+
+v3 is backwards-compatible with v2. All v2 inputs still work with the same defaults. Flip the tag:
+
+```diff
+- uses: nark-sh/nark-action@v2
++ uses: nark-sh/nark-action@v3
+```
+
+The only new inputs are `corpus-token` and `corpus-pro-version`, both optional. If you don't set them, the action behaves exactly like v2.
+
 ## Full example
 
 ```yaml
@@ -55,7 +82,7 @@ jobs:
       - run: npx prisma generate
 
       - name: Check error handling
-        uses: nark-sh/nark-action@v2
+        uses: nark-sh/nark-action@v3
         with:
           tsconfig: ./apps/web/tsconfig.json
 ```
@@ -65,7 +92,7 @@ jobs:
 The first run on any non-Nark-aware codebase typically surfaces 50–250 findings. Block-from-day-one is how scanners get ripped out. Use `continue-on-error: true` for the first week or two, then drop it once the baseline is triaged:
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   id: nark
   continue-on-error: true   # ← Phase 1: shadow mode
 
@@ -95,6 +122,8 @@ Full walkthrough at [nark.sh/recommended-rollout](https://nark.sh/recommended-ro
 | `artifact-name` | Name for the uploaded artifact. | `nark-audit` |
 | `artifact-retention-days` | Workflow artifact retention. GitHub default is 90. | `30` |
 | `telemetry` | If `true`, leave `NARK_TELEMETRY` untouched (CLI default sends anonymous usage data). | `false` |
+| `corpus-token` | GitHub PAT with `read:packages` scope on `@nark-sh/corpus-pro`. When provided, the action writes `.npmrc` auth for `npm.pkg.github.com` and installs `@nark-sh/corpus-pro` before running nark. Leave empty to run with public corpus only. | `''` |
+| `corpus-pro-version` | Version of `@nark-sh/corpus-pro` to install. Ignored when `corpus-token` is empty. | `latest` |
 
 ## Outputs
 
@@ -111,7 +140,7 @@ Full walkthrough at [nark.sh/recommended-rollout](https://nark.sh/recommended-ro
 ### Custom tsconfig path
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   with:
     tsconfig: ./packages/api/tsconfig.json
 ```
@@ -119,7 +148,7 @@ Full walkthrough at [nark.sh/recommended-rollout](https://nark.sh/recommended-ro
 ### Report-only (don't fail the build)
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   with:
     report-only: 'true'
 ```
@@ -129,7 +158,7 @@ Equivalent to `continue-on-error: true` on the step, but distinguishes "scan suc
 ### Fail on warnings too
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   with:
     fail-threshold: warning
 ```
@@ -156,7 +185,7 @@ jobs:
         with:
           node-version: 20
       - run: npm ci
-      - uses: nark-sh/nark-action@v2
+      - uses: nark-sh/nark-action@v3
         with:
           diff-base: ${{ github.event.pull_request.base.sha }}
 ```
@@ -166,7 +195,7 @@ jobs:
 ### Pin to a specific nark version
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   with:
     version: '2.4.0'
 ```
@@ -174,7 +203,7 @@ jobs:
 ### Skip the built-in artifact upload (you'll do it yourself)
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   id: nark
   with:
     upload-artifact: 'false'
@@ -190,7 +219,7 @@ jobs:
 If your project is small enough that 2 GB is plenty, you can save a few hundred ms of Node startup by passing the Node default:
 
 ```yaml
-- uses: nark-sh/nark-action@v2
+- uses: nark-sh/nark-action@v3
   with:
     node-options: ''
 ```

@@ -55,6 +55,14 @@ inputs:
     description: 'If true, leave NARK_TELEMETRY untouched (the CLI default sends anonymous usage data). Default false disables telemetry during CI runs — the SaaS receipts that motivate telemetry come from interactive scans, not CI.'
     required: false
     default: 'false'
+  corpus-token:
+    description: 'GitHub PAT with read:packages scope on @nark-sh/corpus-pro. When provided, the action writes .npmrc auth for npm.pkg.github.com and installs @nark-sh/corpus-pro before running nark. Leave empty to run with public corpus only.'
+    required: false
+    default: ''
+  corpus-pro-version:
+    description: 'Version of @nark-sh/corpus-pro to install. Ignored when corpus-token is empty.'
+    required: false
+    default: 'latest'
 
 outputs:
   audit-path:
@@ -76,6 +84,29 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Configure @nark-sh/corpus-pro registry + install
+      if: inputs.corpus-token != ''
+      shell: bash
+      env:
+        CORPUS_TOKEN: ${{ inputs.corpus-token }}
+        CORPUS_PRO_VERSION: ${{ inputs.corpus-pro-version }}
+      run: |
+        # Write registry mapping + auth token to the repo-local .npmrc.
+        # We use append rather than overwrite so a partner's existing .npmrc
+        # (e.g. a corporate mirror config) is preserved. Duplicate lines
+        # for our scope are fine — npm reads the last one.
+        # The auth token is provided via secrets so GitHub Actions masks it
+        # from logs automatically.
+        {
+          echo "@nark-sh:registry=https://npm.pkg.github.com"
+          echo "//npm.pkg.github.com/:_authToken=${CORPUS_TOKEN}"
+        } >> .npmrc
+
+        # Install @nark-sh/corpus-pro without touching the partner's
+        # package.json. --no-save keeps the install ephemeral. The install
+        # populates node_modules so nark's require() resolution finds it.
+        npm install --no-save "@nark-sh/corpus-pro@${CORPUS_PRO_VERSION}"
+
     - name: Run nark
       id: nark-run
       shell: bash
